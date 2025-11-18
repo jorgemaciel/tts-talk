@@ -136,8 +136,14 @@ async def handle_stop_streaming(sid):
     await sio.emit("final_response", {"audio_path": response_audio_path}, room=sid)
 
 
-# --- 3. Interface Gráfica com Gradio (JavaScript Atualizado) ---
-css = "/* ... (mesmo CSS de antes) ... */"  # O CSS não muda
+# --- 3. Interface Gráfica com Gradio (sem alterações) ---
+css = """
+/* ... (mesmo CSS de antes) ... */
+#transcription_display { padding: 15px; margin: 10px 0; border: 1px solid #444; border-radius: 8px; min-height: 50px; background-color: #1a1a1a; color: #f0f0f0; text-align: center; font-size: 1.1em;}
+.record-button { background-color: #2c2c2c; color: white; border: 1px solid #555; border-radius: 8px; padding: 15px 30px; font-size: 18px; cursor: pointer; transition: background-color 0.2s; }
+.record-button.recording { background-color: #b22222; border-color: #ff4444; }
+.record-button:disabled { background-color: #555; cursor: not-allowed; }
+"""
 
 js_code = """
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
