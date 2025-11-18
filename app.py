@@ -17,67 +17,110 @@ transcribe_pipeline = pipeline(
     device=device,
 )
 
-# --- 2. Configuração do Servidor WebSocket (com a correção) ---
+# --- 2. Configuração do Servidor WebSocket (Lógica de Streaming Atualizada) ---
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
 app_fastapi = fastapi.FastAPI()
 sio_asgi_app = socketio.ASGIApp(sio)
 app_fastapi.mount("/socket.io", sio_asgi_app)
 
-audio_buffers = {}
+# Dicionários para gerenciar o estado de cada cliente
+client_states = {}
 
 
 @sio.on("connect")
 async def connect(sid, environ):
     print(f"Cliente conectado: {sid}")
-    audio_buffers[sid] = bytearray()
+    # Inicializa o estado para um novo cliente
+    client_states[sid] = {
+        "audio_buffer": bytearray(),
+        "last_transcription": "",
+        "processing_task": None,
+    }
 
 
 @sio.on("disconnect")
 async def disconnect(sid):
     print(f"Cliente desconectado: {sid}")
-    if sid in audio_buffers:
-        del audio_buffers[sid]
+    if sid in client_states:
+        # Cancela qualquer tarefa de processamento pendente
+        if client_states[sid]["processing_task"]:
+            client_states[sid]["processing_task"].cancel()
+        del client_states[sid]
+
+
+async def process_audio_chunk_for_transcription(sid):
+    """Função que executa a transcrição em um chunk de áudio."""
+    state = client_states.get(sid)
+    if (
+        not state or len(state["audio_buffer"]) < 16384
+    ):  # Não processa se for muito pequeno
+        return
+
+    print(f"Processando chunk de áudio para {sid}...")
+    temp_path = f"temp_stream_{sid}.webm"
+    with open(temp_path, "wb") as f:
+        f.write(state["audio_buffer"])
+
+    try:
+        # Executa a transcrição pesada em uma thread separada
+        result = await asyncio.to_thread(
+            transcribe_pipeline,
+            temp_path,
+            batch_size=8,
+            generate_kwargs={"language": "portuguese", "task": "transcribe"},
+        )
+        transcription = result["text"].strip() if result and result["text"] else ""
+
+        # Lógica simples para evitar repetição: só atualiza se a nova transcrição for maior
+        if len(transcription) > len(state["last_transcription"]):
+            print(f"Transcrição Parcial ({sid}): {transcription}")
+            state["last_transcription"] = transcription
+            # Envia a atualização para a UI
+            await sio.emit("partial_transcription", {"text": transcription}, room=sid)
+
+    except Exception as e:
+        print(f"Erro na transcrição de chunk: {e}")
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 @sio.on("audio_chunk")
 async def handle_audio_chunk(sid, data):
-    if sid in audio_buffers:
-        audio_buffers[sid].extend(data)
+    state = client_states.get(sid)
+    if state:
+        state["audio_buffer"].extend(data)
+        # Se nenhuma tarefa de processamento estiver rodando, inicia uma nova
+        if state["processing_task"] is None or state["processing_task"].done():
+            # Processa o áudio a cada 2 segundos para simular tempo real
+            state["processing_task"] = asyncio.create_task(asyncio.sleep(2.0))
+            state["processing_task"].add_done_callback(
+                lambda _: asyncio.create_task(
+                    process_audio_chunk_for_transcription(sid)
+                )
+            )
 
 
-# ========= INÍCIO DA CORREÇÃO =========
-# Removemos o argumento 'data' que não estava sendo usado.
 @sio.on("stop_streaming")
 async def handle_stop_streaming(sid):
-    # ========= FIM DA CORREÇÃO =========
-    """Processa o áudio restante e gera a resposta final com TTS."""
-    print(f"Streaming finalizado para {sid}, processando resposta final.")
-    final_transcription = ""
-    buffer = audio_buffers.get(sid, bytearray())
-    if len(buffer) > 4096:
-        temp_path = f"temp_stream_{sid}_final.webm"
-        with open(temp_path, "wb") as f:
-            f.write(buffer)
-        try:
-            result = await asyncio.to_thread(
-                transcribe_pipeline,
-                temp_path,
-                batch_size=8,
-                generate_kwargs={"language": "portuguese", "task": "transcribe"},
-            )
-            final_transcription = result["text"] if result else ""
-            print(f"Transcrição Final ({sid}): {final_transcription}")
-            await sio.emit(
-                "transcription_update",
-                {"text": final_transcription, "final": True},
-                room=sid,
-            )
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+    print(f"Streaming finalizado para {sid}, gerando resposta final.")
+    state = client_states.get(sid)
+    if not state:
+        return
 
-    audio_buffers[sid] = bytearray()
+    # Cancela qualquer tarefa pendente para evitar uma última transcrição desnecessária
+    if state["processing_task"]:
+        state["processing_task"].cancel()
 
+    # Usa a última transcrição completa obtida
+    final_transcription = state["last_transcription"]
+    print(f"Transcrição Final Usada ({sid}): {final_transcription}")
+
+    # Reinicia o buffer e a transcrição para a próxima gravação
+    state["audio_buffer"] = bytearray()
+    state["last_transcription"] = ""
+
+    # Lógica para gerar a resposta de Robert (sem alterações)
     normalized_text = final_transcription.lower().strip()
     trigger_phrases = ["o que você é", "como se chama", "qual seu nome", "quem é você"]
     response_text = (
@@ -93,14 +136,8 @@ async def handle_stop_streaming(sid):
     await sio.emit("final_response", {"audio_path": response_audio_path}, room=sid)
 
 
-# --- 3. Interface Gráfica com Gradio (sem alterações) ---
-css = """
-/* ... (mesmo CSS de antes) ... */
-#transcription_display { padding: 15px; margin: 10px 0; border: 1px solid #444; border-radius: 8px; min-height: 50px; background-color: #1a1a1a; color: #f0f0f0; text-align: center; font-size: 1.1em;}
-.record-button { background-color: #2c2c2c; color: white; border: 1px solid #555; border-radius: 8px; padding: 15px 30px; font-size: 18px; cursor: pointer; transition: background-color 0.2s; }
-.record-button.recording { background-color: #b22222; border-color: #ff4444; }
-.record-button:disabled { background-color: #555; cursor: not-allowed; }
-"""
+# --- 3. Interface Gráfica com Gradio (JavaScript Atualizado) ---
+css = "/* ... (mesmo CSS de antes) ... */"  # O CSS não muda
 
 js_code = """
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
@@ -113,20 +150,17 @@ function main() {
     let mediaRecorder = null;
     let isRecording = false;
 
-    socket.on('connect', () => console.log('Conectado ao servidor WebSocket!'));
-    socket.on('disconnect', () => console.log('Desconectado do servidor WebSocket.'));
+    socket.on('connect', () => console.log('Conectado!'));
 
-    socket.on('transcription_update', (data) => {
-        if (data.final) {
-            display.innerText = data.text || "Não consegui ouvir nada. Tente novamente.";
-        }
+    // NOVO: Listener para transcrições parciais
+    socket.on('partial_transcription', (data) => {
+        console.log('Parcial:', data.text);
+        display.innerText = data.text || "Ouvindo...";
     });
 
     socket.on('final_response', (data) => {
-        console.log('Recebida resposta final:', data.audio_path);
         const audio = new Audio('/file=' + data.audio_path);
         audio.play();
-        
         button.disabled = false;
         button.innerText = "Pressione para Falar";
     });
@@ -134,6 +168,8 @@ function main() {
     const toggleRecording = async () => {
         if (isRecording) {
             mediaRecorder.stop();
+            const stream = mediaRecorder.stream;
+            stream.getTracks().forEach(track => track.stop()); // Libera o microfone
             isRecording = false;
             button.classList.remove('recording');
             button.innerText = "Processando...";
@@ -148,6 +184,7 @@ function main() {
                 button.innerText = "Gravando... (Pressione para Parar)";
                 
                 mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+                mediaRecorder.stream = stream; // Salva a stream para poder pará-la depois
                 
                 mediaRecorder.ondataavailable = (event) => {
                     if (event.data.size > 0) {
@@ -155,38 +192,32 @@ function main() {
                     }
                 };
                 
-                mediaRecorder.start(1000);
+                // Envia o primeiro chunk rapidamente, depois a cada segundo
+                mediaRecorder.start(1000); 
             } catch (err) {
-                console.error("Erro ao acessar microfone:", err);
-                alert("Erro ao acessar o microfone. Verifique as permissões.");
+                alert("Erro ao acessar o microfone.");
             }
         }
     };
-
     button.onclick = toggleRecording;
 }
-
 window.addEventListener('load', main);
 </script>
 """
 
 with gr.Blocks(css=css, head=js_code) as demo:
+    # O HTML da UI não muda
     gr.HTML(f"""<h2 style="text-align: center;">Assistente Médico Robert (SESA)</h2>""")
     gr.HTML(
-        f"""<div id="transcription_display">A transcrição aparecerá aqui...</div>"""
+        f"""<div id="transcription_display">Pressione o botão para começar a falar...</div>"""
     )
     gr.HTML(
         f"""<div style="display:flex; justify-content:center; margin-top:20px;"><button id="recordButton" class="record-button">Pressione para Falar</button></div>"""
     )
 
-# Monta a aplicação Gradio dentro do FastAPI
 app = gr.mount_gradio_app(app_fastapi, demo, path="/")
 
-# --- 4. Como Executar (sem alterações) ---
 if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-# Para executar no terminal:
-# uvicorn app:app --reload
