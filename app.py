@@ -183,6 +183,14 @@ async def process_audio_chunk_for_transcription(sid):
 async def handle_audio_chunk(sid, data):
     state = client_states.get(sid)
     if state:
+        # Debug: Check if this is the first chunk and if it has the EBML header
+        if len(state["audio_buffer"]) == 0:
+            header_hex = data[:4].hex().upper() if len(data) >= 4 else "TOO_SHORT"
+            print(f"Primeiro chunk recebido de {sid}. Tamanho: {len(data)} bytes. Header: {header_hex}")
+            # EBML Header ID should be 1A 45 DF A3
+            if header_hex != "1A45DFA3":
+                print("AVISO: O primeiro chunk não parece conter o cabeçalho EBML (WebM).")
+        
         state["audio_buffer"].extend(data)
         # Se nenhuma tarefa de processamento estiver rodando, inicia uma nova
         if state["processing_task"] is None or state["processing_task"].done():

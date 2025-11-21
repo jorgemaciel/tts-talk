@@ -166,7 +166,11 @@
             // Start Recording
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+                const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
+                                 ? 'audio/webm;codecs=opus' 
+                                 : 'audio/webm';
+                console.log("Using MIME type:", mimeType);
+                mediaRecorder = new MediaRecorder(stream, { mimeType: mimeType });
                 
                 mediaRecorder.ondataavailable = (event) => {
                     if (event.data.size > 0 && socket.connected) {
