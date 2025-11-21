@@ -12,3 +12,5 @@ wheels/
 # Files media
 *.mp3
 *.webm
+*.wav
+

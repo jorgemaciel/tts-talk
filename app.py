@@ -9,6 +9,7 @@ import socketio
 import asyncio
 import subprocess
 import numpy as np
+import shutil
 
 
 # --- 1. Configuração do Modelo (sem alterações) ---
@@ -45,8 +46,13 @@ def read_audio_ffmpeg(file_path):
     Lê áudio usando ffmpeg e converte para tensor float32 (16kHz, mono).
     Isso evita dependências complexas de backend de áudio do python (torchaudio/soundfile).
     """
+    ffmpeg_path = shutil.which("ffmpeg")
+    if not ffmpeg_path:
+        # Fallback to default command if not found (though likely to fail if not in PATH)
+        ffmpeg_path = "ffmpeg"
+
     cmd = [
-        "ffmpeg",
+        ffmpeg_path,
         "-nostdin",
         "-threads",
         "0",
@@ -126,9 +132,9 @@ async def process_audio_chunk_for_transcription(sid):
             wav = read_audio_ffmpeg(temp_path)
 
             if wav is not None:
-                # Executa VAD
+                # Executa VAD com threshold ajustado
                 speech_timestamps = get_speech_timestamps(
-                    wav, vad_model, sampling_rate=16000
+                    wav, vad_model, sampling_rate=16000, threshold=0.4
                 )
 
                 if not speech_timestamps:
@@ -141,14 +147,20 @@ async def process_audio_chunk_for_transcription(sid):
                         f"VAD: Fala detectada ({len(speech_timestamps)} segmentos). Prosseguindo."
                     )
             else:
-                print("VAD: Falha ao ler áudio. Tentando transcrever mesmo assim.")
+                print("VAD: Falha ao ler áudio. Abortando transcrição para evitar ruído.")
+                return
 
         # Executa a transcrição pesada em uma thread separada
         result = await asyncio.to_thread(
             transcribe_pipeline,
             temp_path,
             batch_size=8,
-            generate_kwargs={"language": "portuguese", "task": "transcribe"},
+            generate_kwargs={
+                "language": "portuguese", 
+                "task": "transcribe",
+                "condition_on_prev_tokens": False, # Evita alucinações baseadas em contexto anterior ruim
+                "initial_prompt": "Isso é uma conversa médica. Transcreva com precisão."
+            },
         )
         transcription = result["text"].strip() if result and result["text"] else ""
 
