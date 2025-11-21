@@ -7,6 +7,9 @@ import os
 import fastapi
 import socketio
 import asyncio
+import subprocess
+import numpy as np
+
 
 # --- 1. Configuração do Modelo (sem alterações) ---
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -16,6 +19,61 @@ transcribe_pipeline = pipeline(
     chunk_length_s=30,
     device=device,
 )
+
+# --- 1.1 Configuração VAD (Silero) ---
+try:
+    # Carrega o modelo VAD do Silero
+    # trust_repo=True é necessário para evitar avisos/erros em versões recentes
+    vad_model, utils = torch.hub.load(
+        repo_or_dir="snakers4/silero-vad",
+        model="silero_vad",
+        force_reload=False,
+        onnx=False,
+        trust_repo=True,
+    )
+    # Desempacota apenas o que precisamos. Ignoramos read_audio padrão pois usaremos ffmpeg
+    (get_speech_timestamps, _, _, _, _) = utils
+    vad_model.to(device)
+    print("Modelo VAD carregado com sucesso.")
+except Exception as e:
+    print(f"Erro ao carregar VAD: {e}")
+    vad_model = None
+
+
+def read_audio_ffmpeg(file_path):
+    """
+    Lê áudio usando ffmpeg e converte para tensor float32 (16kHz, mono).
+    Isso evita dependências complexas de backend de áudio do python (torchaudio/soundfile).
+    """
+    cmd = [
+        "ffmpeg",
+        "-nostdin",
+        "-threads",
+        "0",
+        "-i",
+        file_path,
+        "-f",
+        "s16le",
+        "-ac",
+        "1",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        "-",
+    ]
+    try:
+        # Executa ffmpeg e captura a saída (bytes raw PCM)
+        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError as e:
+        print(f"Erro ffmpeg ao ler {file_path}: {e}")
+        return None
+
+    # Converte bytes para numpy array int16, depois para float32 normalizado entre -1 e 1
+    return torch.from_numpy(
+        np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
+    )
+
 
 # --- 2. Configuração do Servidor WebSocket (Lógica de Streaming Atualizada) ---
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
@@ -62,6 +120,29 @@ async def process_audio_chunk_for_transcription(sid):
         f.write(state["audio_buffer"])
 
     try:
+        # --- VAD CHECK ---
+        if vad_model:
+            # Lê o áudio salvo usando ffmpeg para garantir robustez
+            wav = read_audio_ffmpeg(temp_path)
+
+            if wav is not None:
+                # Executa VAD
+                speech_timestamps = get_speech_timestamps(
+                    wav, vad_model, sampling_rate=16000
+                )
+
+                if not speech_timestamps:
+                    print(
+                        f"VAD: Nenhuma fala detectada para {sid}. Pulando transcrição."
+                    )
+                    return
+                else:
+                    print(
+                        f"VAD: Fala detectada ({len(speech_timestamps)} segmentos). Prosseguindo."
+                    )
+            else:
+                print("VAD: Falha ao ler áudio. Tentando transcrever mesmo assim.")
+
         # Executa a transcrição pesada em uma thread separada
         result = await asyncio.to_thread(
             transcribe_pipeline,
