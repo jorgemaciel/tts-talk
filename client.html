@@ -34,15 +34,26 @@
             font-size: 0.9rem;
             color: #888;
         }
-        #transcription {
+        #transcription-container {
             background-color: #2c2c2c;
             padding: 1rem;
             border-radius: 8px;
-            min-height: 100px;
+            height: 300px;
+            overflow-y: auto;
             margin-bottom: 1.5rem;
             text-align: left;
-            white-space: pre-wrap;
             border: 1px solid #333;
+            display: flex;
+            flex-direction: column;
+        }
+        .final-segment {
+            color: #e0e0e0;
+            margin: 0 0 8px 0;
+            line-height: 1.5;
+        }
+        #current-transcription {
+            color: #888;
+            font-style: italic;
         }
         button {
             background-color: #bb86fc;
@@ -92,7 +103,10 @@
 <div class="container">
     <h1>Transcription Client</h1>
     <div id="status">Connecting...</div>
-    <div id="transcription">Press start to speak...</div>
+    <div id="transcription-container">
+        <div id="transcription-history"></div>
+        <div id="current-transcription">Press start to speak...</div>
+    </div>
     <button id="recordBtn">Start Recording</button>
     <div class="log" id="log"></div>
 </div>
@@ -138,8 +152,33 @@
     });
 
     socket.on('partial_transcription', (data) => {
-        transcriptionDiv.textContent = data.text;
+        const currentDiv = document.getElementById('current-transcription');
+        if (currentDiv) {
+            currentDiv.textContent = data.text;
+            scrollToBottom();
+        }
     });
+
+    socket.on('final_segment', (data) => {
+        if (!data.text) return;
+        
+        const historyDiv = document.getElementById('transcription-history');
+        const p = document.createElement('p');
+        p.className = 'final-segment';
+        p.textContent = data.text;
+        historyDiv.appendChild(p);
+        
+        // Clear current
+        const currentDiv = document.getElementById('current-transcription');
+        if (currentDiv) currentDiv.textContent = '';
+        
+        scrollToBottom();
+    });
+
+    function scrollToBottom() {
+        const container = document.getElementById('transcription-container');
+        container.scrollTop = container.scrollHeight;
+    }
 
     socket.on('final_response', (data) => {
         log('Received final response');

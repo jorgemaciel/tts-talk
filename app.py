@@ -16,7 +16,7 @@ import shutil
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 transcribe_pipeline = pipeline(
     task="automatic-speech-recognition",
-    model="openai/whisper-base",
+    model="openai/whisper-small",
     chunk_length_s=30,
     device=device,
 )
@@ -141,19 +141,25 @@ async def process_audio_chunk_for_transcription(sid):
                 )
 
                 if not speech_timestamps:
-                    print(
-                        f"VAD: Nenhuma fala detectada para {sid}. Pulando transcrição."
-                    )
+                    # Se o buffer for muito grande e só tiver silêncio, limpa para economizar memória
+                    if len(state["audio_buffer"]) > 16000 * 10: # 10 segundos de silêncio
+                         state["audio_buffer"] = bytearray()
+                         state["last_transcription"] = ""
                     return
-                else:
-                    print(
-                        f"VAD: Fala detectada ({len(speech_timestamps)} segmentos). Prosseguindo."
-                    )
+                
+                # Lógica de Flush baseada em silêncio
+                last_speech_end = speech_timestamps[-1]['end']
+                total_samples = len(wav)
+                silence_duration = (total_samples - last_speech_end) / 16000.0
+                
+                should_flush = silence_duration > 1.0 # 1.0 segundo de silêncio após fala
             else:
-                print("VAD: Falha ao ler áudio. Abortando transcrição para evitar ruído.")
+                print("VAD: Falha ao ler áudio. Abortando.")
                 return
+        else:
+            should_flush = False
 
-        # Executa a transcrição pesada em uma thread separada
+        # Executa a transcrição
         result = await asyncio.to_thread(
             transcribe_pipeline,
             temp_path,
@@ -165,12 +171,20 @@ async def process_audio_chunk_for_transcription(sid):
         )
         transcription = result["text"].strip() if result and result["text"] else ""
 
-        # Lógica simples para evitar repetição: só atualiza se a nova transcrição for maior
-        if len(transcription) > len(state["last_transcription"]):
-            print(f"Transcrição Parcial ({sid}): {transcription}")
-            state["last_transcription"] = transcription
-            # Envia a atualização para a UI
-            await sio.emit("partial_transcription", {"text": transcription}, room=sid)
+        if len(transcription) > 0:
+            if should_flush:
+                print(f"Flush Transcrição ({sid}): {transcription}")
+                # Envia segmento finalizado
+                await sio.emit("final_segment", {"text": transcription}, room=sid)
+                # Limpa o buffer e estado
+                state["audio_buffer"] = bytearray()
+                state["last_transcription"] = ""
+                # Envia sinal para limpar a parcial na UI
+                await sio.emit("partial_transcription", {"text": ""}, room=sid)
+            elif len(transcription) > len(state["last_transcription"]):
+                print(f"Parcial ({sid}): {transcription}")
+                state["last_transcription"] = transcription
+                await sio.emit("partial_transcription", {"text": transcription}, room=sid)
 
     except Exception as e:
         print(f"Erro na transcrição de chunk: {e}")
