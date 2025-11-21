@@ -157,9 +157,7 @@ async def process_audio_chunk_for_transcription(sid):
             batch_size=8,
             generate_kwargs={
                 "language": "portuguese", 
-                "task": "transcribe",
-                "condition_on_prev_tokens": False, # Evita alucinações baseadas em contexto anterior ruim
-                "initial_prompt": "Isso é uma conversa médica. Transcreva com precisão."
+                "task": "transcribe"
             },
         )
         transcription = result["text"].strip() if result and result["text"] else ""
