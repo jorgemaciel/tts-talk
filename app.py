@@ -70,9 +70,12 @@ def read_audio_ffmpeg(file_path):
     ]
     try:
         # Executa ffmpeg e captura a saída (bytes raw PCM)
-        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL)
+        # Capture stderr to debug
+        process = subprocess.run(cmd, capture_output=True, check=True)
+        out = process.stdout
     except subprocess.CalledProcessError as e:
         print(f"Erro ffmpeg ao ler {file_path}: {e}")
+        print(f"FFmpeg stderr: {e.stderr.decode('utf-8', errors='replace')}")
         return None
 
     # Converte bytes para numpy array int16, depois para float32 normalizado entre -1 e 1
